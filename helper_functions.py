@@ -252,3 +252,63 @@ def create_spectrogram_features(audio, desired_length, sample_rate):
     # Get back color channel axis to make features accetable for the model input shape
     log_mel_spectrogram_with_color_channel = tf.expand_dims(log_mel_spectrogram, axis=-1).numpy()
     return log_mel_spectrogram_with_color_channel
+
+
+def run_full_int_q_tflite_model(tflite_file, test_image_indices, x_data):
+  # Initialize the interpreter
+  interpreter = tf.lite.Interpreter(model_path=str(tflite_file))
+  interpreter.allocate_tensors()
+
+  input_details = interpreter.get_input_details()[0]
+  output_details = interpreter.get_output_details()[0]
+
+  predictions = np.zeros((len(test_image_indices),), dtype=int)
+  for i, test_image_index in enumerate(test_image_indices):
+    test_data_point = x_data[test_image_index]
+
+    # Check if the input type is quantized, then rescale input data to uint8
+    if input_details['dtype'] == np.uint8:
+      input_scale, input_zero_point = input_details["quantization"]
+      test_data_point = test_data_point / input_scale + input_zero_point
+
+    test_data_point = np.expand_dims(test_data_point, axis=0).astype(input_details["dtype"])
+    interpreter.set_tensor(input_details["index"], test_data_point)
+    interpreter.invoke()
+    output = interpreter.get_tensor(output_details["index"])[0]
+
+    predictions[i] = output.argmax()
+
+  return predictions
+
+def full_int_model_predict(tflite_file, x_data):
+  test_image_indices = range(len(x_data))
+  predictions = run_full_int_q_tflite_model(tflite_file, test_image_indices, x_data)
+  return predictions
+
+def get_f1_scores_of_non_overlapping_partitions_full_int_q(tflite_file, x_data, y_true, n_partitions=10):
+    partition_size = len(x_data) // n_partitions
+    partitions = []
+
+    for i in range(n_partitions):
+        start = i * partition_size
+        end = start + partition_size
+        partitions.append((np.arange(start, end)))
+
+    f1_scores = []
+
+    for indices in partitions:
+        y_pred = full_int_model_predict(tflite_file, x_data[indices])
+        f1 = f1_score(y_true[indices], y_pred)
+        f1_scores.append(f1)
+
+    return f1_scores
+
+def get_f1_scores_of_bootstarping_partitions_full_int_q(tflite_file, x_data, y_true, n_bootstrap=100, n_chosen_samples=100):
+    f1_scores = []
+    n_samples = len(y_true)
+    for _ in range(n_bootstrap):
+        indices = np.random.choice(n_samples, size=n_chosen_samples, replace=True)
+        y_pred = full_int_model_predict(tflite_file, x_data[indices])
+        f1 = f1_score(y_true[indices], y_pred)
+        f1_scores.append(f1)
+    return f1_scores
